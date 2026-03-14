@@ -713,6 +713,11 @@ export default function HistorialCDPForm() {
       editCompromisosFuturosMonto,
     } = payload
 
+    if (!editFecha || !editFechaMemo) {
+      toast.error("Faltan fecha o fecha memo")
+      return
+    }
+
     const nuevoMontoParsed = Number.parseInt(editMontoDisponibilidad || "0", 10)
     setIsSaving(true)
     try {
