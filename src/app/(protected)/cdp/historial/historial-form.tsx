@@ -25,7 +25,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { FileText, Loader2, Package, Download, Eye, Trash2, Edit, CalendarIcon, Save, ChevronLeft, ChevronRight } from "lucide-react"
+import { FileText, Loader2, Package, Download, Eye, Trash2, Edit, CalendarIcon, Save, ChevronLeft, ChevronRight, CheckCircle, Stamp } from "lucide-react"
 import { format } from "date-fns"
 import { es } from "date-fns/locale"
 import { toast } from "sonner"
@@ -35,6 +35,16 @@ import { descargarPDFCDP, abrirPDFCDP } from "@/lib/pdf-generator"
 import { useAuth } from "@/context/auth-context"
 import { cn, getSubtituloFromCodigoCuenta, parseDesagregacionFromCodigoCuenta, toDateSafe } from "@/lib/utils"
 import { registrarMovimientoCuenta } from "@/lib/bitacora"
+
+/** A partir de esta fecha (inclusive) los CDP pueden ser oficializados. Antes no. */
+const OFICIALIZAR_FECHA_DESDE = new Date(2026, 2, 2) // 02/03/2026
+
+function puedeOficializarCDP(cdp: CDP): boolean {
+  const d = toDateSafe(cdp.fecha)
+  if (!d) return false
+  const diaCDP = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  return diaCDP >= OFICIALIZAR_FECHA_DESDE.getTime()
+}
 
 /** Documento CDP tal como se guarda en Firestore (con Timestamp y campos IN4/2026) */
 interface CDP {
@@ -77,6 +87,10 @@ interface CDP {
   funcionarioNombre?: string
   funcionarioTipo?: "titular" | "subrogante"
   funcionarioFirmaPath?: string
+  /** Si true, el CDP está oficializado y ya no se puede editar */
+  oficializado?: boolean
+  oficializadoEn?: Timestamp
+  oficializadoPor?: string
 }
 
 /** Cuenta presupuestaria (solo campos necesarios para el selector de edición) */
@@ -86,6 +100,385 @@ interface Cuenta {
   denominacion: string
   presupuestoTotal: number
   presupuestoDisponible: number
+}
+
+/** Payload que envía el formulario de edición al guardar (evita estado en el padre y lag al escribir) */
+export type EditCDPFormPayload = {
+  editTipoCDP: "22-24-33" | "31"
+  editFecha: Date | undefined
+  editFechaMemo: Date | undefined
+  editMemoNumero: string
+  editCargoSolicitante: string
+  editNombreSolicitante: string
+  editDestinoDisponibilidad: string
+  editMontoDisponibilidad: string
+  editCuentaId: string
+  editAreaGestion: string
+  editPrograma: string
+  editSubPrograma: string
+  editNombreProyecto: string
+  editCodigoBIP: string
+  editMontoMaximoAnual: string
+  editCompromisosFuturosAnio: string
+  editCompromisosFuturosMonto: string
+}
+
+/** Formulario de edición de CDP con estado local para no re-renderizar el listado al escribir */
+function EditCDPFormDialog({
+  open,
+  onOpenChange,
+  cdp,
+  cuentas,
+  onSave,
+  isSaving,
+  formatMontoFn,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  cdp: CDP | null
+  cuentas: Cuenta[]
+  onSave: (payload: EditCDPFormPayload) => void | Promise<void>
+  isSaving: boolean
+  formatMontoFn: (n: number) => string
+}) {
+  const [editTipoCDP, setEditTipoCDP] = useState<"22-24-33" | "31">("22-24-33")
+  const [editFecha, setEditFecha] = useState<Date>()
+  const [editFechaMemo, setEditFechaMemo] = useState<Date>()
+  const [editMemoNumero, setEditMemoNumero] = useState("")
+  const [editCargoSolicitante, setEditCargoSolicitante] = useState("")
+  const [editNombreSolicitante, setEditNombreSolicitante] = useState("")
+  const [editDestinoDisponibilidad, setEditDestinoDisponibilidad] = useState("")
+  const [editMontoDisponibilidad, setEditMontoDisponibilidad] = useState("")
+  const [editMontoDisplay, setEditMontoDisplay] = useState("")
+  const [editCuentaId, setEditCuentaId] = useState("")
+  const [editAreaGestion, setEditAreaGestion] = useState("")
+  const [editPrograma, setEditPrograma] = useState("")
+  const [editSubPrograma, setEditSubPrograma] = useState("")
+  const [editNombreProyecto, setEditNombreProyecto] = useState("")
+  const [editCodigoBIP, setEditCodigoBIP] = useState("")
+  const [editMontoMaximoAnual, setEditMontoMaximoAnual] = useState("")
+  const [editMontoMaximoAnualDisplay, setEditMontoMaximoAnualDisplay] = useState("")
+  const [editCompromisosFuturosAnio, setEditCompromisosFuturosAnio] = useState("")
+  const [editCompromisosFuturosMonto, setEditCompromisosFuturosMonto] = useState("")
+  const [editCompromisosFuturosMontoDisplay, setEditCompromisosFuturosMontoDisplay] = useState("")
+
+  useEffect(() => {
+    if (!open || !cdp) return
+    const tipo = cdp.tipoCDP ?? "22-24-33"
+    setEditTipoCDP(tipo)
+    setEditFecha(toDateSafe(cdp.fecha) ?? undefined)
+    setEditFechaMemo(toDateSafe(cdp.fechaMemo) ?? undefined)
+    setEditMemoNumero(cdp.memoNumero)
+    setEditCargoSolicitante(cdp.cargoSolicitante)
+    setEditNombreSolicitante(cdp.nombreSolicitante)
+    setEditDestinoDisponibilidad(cdp.destinoDisponibilidad)
+    setEditMontoDisponibilidad(cdp.montoDisponibilidad.toString())
+    setEditMontoDisplay(formatMontoFn(cdp.montoDisponibilidad))
+    setEditCuentaId(cdp.cuentaId || "")
+    setEditAreaGestion(cdp.areaGestion)
+    setEditPrograma(cdp.programa)
+    setEditSubPrograma(cdp.subPrograma)
+    if (tipo === "31") {
+      setEditNombreProyecto(cdp.nombreProyecto ?? "")
+      setEditCodigoBIP(cdp.codigoBIP ?? "")
+      setEditMontoMaximoAnual(String(cdp.montoMaximoAnual ?? ""))
+      setEditMontoMaximoAnualDisplay(cdp.montoMaximoAnual != null ? formatMontoFn(cdp.montoMaximoAnual) : "")
+      setEditCompromisosFuturosAnio(cdp.compromisosFuturosAnio ?? "")
+      setEditCompromisosFuturosMonto(String(cdp.compromisosFuturosMonto ?? ""))
+      setEditCompromisosFuturosMontoDisplay(cdp.compromisosFuturosMonto != null ? formatMontoFn(cdp.compromisosFuturosMonto) : "")
+    } else {
+      setEditNombreProyecto("")
+      setEditCodigoBIP("")
+      setEditMontoMaximoAnual("")
+      setEditMontoMaximoAnualDisplay("")
+      setEditCompromisosFuturosAnio("")
+      setEditCompromisosFuturosMonto("")
+      setEditCompromisosFuturosMontoDisplay("")
+    }
+  }, [open, cdp, formatMontoFn])
+
+  const handleMontoChange = (value: string) => {
+    const numericValue = value.replace(/\D/g, "")
+    setEditMontoDisponibilidad(numericValue)
+    setEditMontoDisplay(numericValue ? (Number.isNaN(Number.parseInt(numericValue, 10)) ? "" : Number.parseInt(numericValue, 10).toLocaleString("es-CL")) : "")
+  }
+  const handleCuentaChange = (cuentaId: string) => setEditCuentaId(cuentaId)
+  const handleMontoMaximoAnualChange = (value: string) => {
+    const numericValue = value.replace(/\D/g, "")
+    setEditMontoMaximoAnual(numericValue)
+    setEditMontoMaximoAnualDisplay(numericValue ? (Number.isNaN(Number.parseInt(numericValue, 10)) ? "" : Number.parseInt(numericValue, 10).toLocaleString("es-CL")) : "")
+  }
+  const handleCompromisosFuturosMontoChange = (value: string) => {
+    const numericValue = value.replace(/\D/g, "")
+    setEditCompromisosFuturosMonto(numericValue)
+    setEditCompromisosFuturosMontoDisplay(numericValue ? (Number.isNaN(Number.parseInt(numericValue, 10)) ? "" : Number.parseInt(numericValue, 10).toLocaleString("es-CL")) : "")
+  }
+
+  const handleSubmit = () => {
+    if (!editFecha || !editFechaMemo) {
+      toast.error("Debe seleccionar las fechas")
+      return
+    }
+    if (!editMemoNumero?.trim() || !editCargoSolicitante?.trim() || !editNombreSolicitante?.trim() || !editDestinoDisponibilidad?.trim()) {
+      toast.error("Debe completar todos los campos obligatorios")
+      return
+    }
+    const nuevoMontoParsed = Number.parseInt(editMontoDisponibilidad || "0", 10)
+    if (Number.isNaN(nuevoMontoParsed) || nuevoMontoParsed <= 0) {
+      toast.error("El monto debe ser mayor a 0")
+      return
+    }
+    if (!editCuentaId) {
+      toast.error("Debe seleccionar una cuenta presupuestaria")
+      return
+    }
+    if (editTipoCDP === "31") {
+      if (!editNombreProyecto?.trim()) {
+        toast.error("Debe ingresar el nombre del proyecto (Tipo 31)")
+        return
+      }
+      if (!editCodigoBIP?.trim()) {
+        toast.error("Debe ingresar el código BIP (Tipo 31)")
+        return
+      }
+    }
+    onSave({
+      editTipoCDP,
+      editFecha,
+      editFechaMemo,
+      editMemoNumero: editMemoNumero.trim(),
+      editCargoSolicitante: editCargoSolicitante.trim(),
+      editNombreSolicitante: editNombreSolicitante.trim(),
+      editDestinoDisponibilidad: editDestinoDisponibilidad.trim(),
+      editMontoDisponibilidad,
+      editCuentaId,
+      editAreaGestion,
+      editPrograma,
+      editSubPrograma,
+      editNombreProyecto: editNombreProyecto.trim(),
+      editCodigoBIP: editCodigoBIP.trim(),
+      editMontoMaximoAnual,
+      editCompromisosFuturosAnio: editCompromisosFuturosAnio.trim(),
+      editCompromisosFuturosMonto,
+    })
+  }
+
+  if (!cdp) return null
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="text-xl font-bold flex items-center gap-2">
+            <Edit className="h-6 w-6 text-blue-600" />
+            Editar CDP N° {cdp.cdpNumero}
+          </DialogTitle>
+          <DialogDescription>
+            Modifique los campos necesarios y guarde los cambios. Los montos se ajustarán automáticamente en las cuentas presupuestarias.
+          </DialogDescription>
+        </DialogHeader>
+        <p className="text-sm text-red-600 dark:text-red-400 font-medium">
+          Si cambia el tipo de CDP, no olvide cambiar la cuenta presupuestaria correspondiente.
+        </p>
+        <div className="space-y-6 py-4">
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white border-b pb-2">Información General</h3>
+            <div className="space-y-2">
+              <Label>Tipo de CDP</Label>
+              <Select value={editTipoCDP} onValueChange={(v) => setEditTipoCDP(v as "22-24-33" | "31")}>
+                <SelectTrigger className="w-full max-w-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="22-24-33">Subtítulo 21 al 30, 32 y 33</SelectItem>
+                  <SelectItem value="31">Subtítulo 31</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="edit-fecha">Fecha *</Label>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button id="edit-fecha" variant="outline" className={cn("w-full justify-start text-left font-normal", !editFecha && "text-muted-foreground")}>
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {editFecha ? format(editFecha, "PPP", { locale: es }) : "Seleccionar fecha"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar mode="single" selected={editFecha} onSelect={(date) => setEditFecha(date)} locale={es} initialFocus />
+                  </PopoverContent>
+                </Popover>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-memo">Memo N° *</Label>
+                <Input id="edit-memo" value={editMemoNumero} onChange={(e) => setEditMemoNumero(e.target.value)} placeholder="Ej: 123/2026" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-fecha-memo">Fecha Memo *</Label>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button id="edit-fecha-memo" variant="outline" className={cn("w-full justify-start text-left font-normal", !editFechaMemo && "text-muted-foreground")}>
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {editFechaMemo ? format(editFechaMemo, "PPP", { locale: es }) : "Seleccionar fecha"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar mode="single" selected={editFechaMemo} onSelect={(date) => setEditFechaMemo(date)} locale={es} initialFocus />
+                  </PopoverContent>
+                </Popover>
+              </div>
+            </div>
+          </div>
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white border-b pb-2">Información del Solicitante</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="edit-nombre">Nombre Solicitante *</Label>
+                <Input id="edit-nombre" value={editNombreSolicitante} onChange={(e) => setEditNombreSolicitante(e.target.value)} placeholder="Nombre completo" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-cargo">Cargo Solicitante *</Label>
+                <Input id="edit-cargo" value={editCargoSolicitante} onChange={(e) => setEditCargoSolicitante(e.target.value)} placeholder="Cargo del solicitante" />
+              </div>
+            </div>
+          </div>
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white border-b pb-2">Información Presupuestaria</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="edit-monto">Monto Disponibilidad *</Label>
+                <Input id="edit-monto" value={editMontoDisplay} onChange={(e) => handleMontoChange(e.target.value)} placeholder="$ 0" className="text-lg font-semibold" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-cuenta">Cuenta Presupuestaria *</Label>
+                <Select value={editCuentaId} onValueChange={handleCuentaChange}>
+                  <SelectTrigger id="edit-cuenta" className="w-full">
+                    <SelectValue placeholder="Seleccione una cuenta">
+                      {editCuentaId && (() => {
+                        const cuentaActual = cuentas.find(c => c.id === editCuentaId)
+                        return cuentaActual ? (
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold">{cuentaActual.codigo}</span>
+                            <span className="text-sm text-gray-600">-</span>
+                            <span className="text-sm truncate">{cuentaActual.denominacion}</span>
+                            <span className="text-sm font-semibold text-green-600 ml-auto">$ {cuentaActual.presupuestoDisponible.toLocaleString("es-CL")}</span>
+                          </div>
+                        ) : "Seleccione una cuenta"
+                      })()}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent className="max-h-[400px]">
+                    {cuentas.length === 0 && <div className="px-4 py-3 text-sm text-gray-500">No hay cuentas disponibles. Cargando...</div>}
+                    {cuentas.map((cuenta) => (
+                      <SelectItem key={cuenta.id} value={cuenta.id} className="cursor-pointer">
+                        <div className="flex items-start gap-2 py-1">
+                          <span className="font-semibold text-gray-900 min-w-[180px]">{cuenta.codigo}</span>
+                          <span className="text-sm text-gray-600 flex-1 truncate max-w-[300px]" title={cuenta.denominacion}>{cuenta.denominacion}</span>
+                          <span className="text-sm font-semibold text-green-600 ml-auto whitespace-nowrap">$ {cuenta.presupuestoDisponible.toLocaleString("es-CL")}</span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {editCuentaId && (() => {
+                  const cuentaSeleccionadaEdit = cuentas.find(c => c.id === editCuentaId)
+                  const montoEdit = Number.parseInt(editMontoDisponibilidad || "0")
+                  const montoOriginal = cdp?.montoDisponibilidad || 0
+                  const esMismaCuenta = editCuentaId === cdp?.cuentaId
+                  if (cuentaSeleccionadaEdit) {
+                    let presupuestoProyectado = cuentaSeleccionadaEdit.presupuestoDisponible
+                    if (esMismaCuenta) presupuestoProyectado = presupuestoProyectado + montoOriginal - montoEdit
+                    else presupuestoProyectado = presupuestoProyectado - montoEdit
+                    const suficiente = presupuestoProyectado >= 0
+                    return (
+                      <div className={cn("text-sm px-3 py-2 rounded-md mt-2", suficiente ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300" : "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300")}>
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium">{suficiente ? "✓ Presupuesto suficiente" : "✗ Presupuesto insuficiente"}</span>
+                        </div>
+                        <div className="text-xs mt-1 space-y-0.5">
+                          <div>Disponible actual: ${cuentaSeleccionadaEdit.presupuestoDisponible.toLocaleString("es-CL")}</div>
+                          <div>Quedará disponible: ${presupuestoProyectado.toLocaleString("es-CL")}</div>
+                        </div>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
+              </div>
+            </div>
+          </div>
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white border-b pb-2">Área de Gestión y Programas</h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="edit-area">Área de Gestión</Label>
+                <Input id="edit-area" value={editAreaGestion} onChange={(e) => setEditAreaGestion(e.target.value)} placeholder="Área" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-programa">Programa</Label>
+                <Input id="edit-programa" value={editPrograma} onChange={(e) => setEditPrograma(e.target.value)} placeholder="Programa" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-subprograma">Sub-Programa</Label>
+                <Input id="edit-subprograma" value={editSubPrograma} onChange={(e) => setEditSubPrograma(e.target.value)} placeholder="Sub-Programa" />
+              </div>
+            </div>
+          </div>
+          {editTipoCDP === "31" && (
+            <div className="space-y-4">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white border-b pb-2">Datos Subtítulo 31</h3>
+              {editCuentaId && (() => {
+                const cuentaEdit = cuentas.find((c) => c.id === editCuentaId)
+                if (!cuentaEdit) return null
+                return (
+                  <div className="p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div><span className="text-gray-600 dark:text-gray-400">Código:</span><span className="ml-2 font-mono font-semibold">{cuentaEdit.codigo}</span></div>
+                      <div><span className="text-gray-600 dark:text-gray-400">Presupuesto Total:</span><span className="ml-2 font-semibold">$ {cuentaEdit.presupuestoTotal.toLocaleString("es-CL")}</span></div>
+                      <div className="col-span-2"><span className="text-gray-600 dark:text-gray-400">Denominación:</span><span className="ml-2 font-semibold">{cuentaEdit.denominacion}</span></div>
+                      <div className="col-span-2"><span className="text-gray-600 dark:text-gray-400">Presupuesto Disponible:</span><span className={cn("ml-2 font-semibold", cuentaEdit.presupuestoDisponible > cuentaEdit.presupuestoTotal * 0.5 ? "text-green-600" : cuentaEdit.presupuestoDisponible > cuentaEdit.presupuestoTotal * 0.2 ? "text-yellow-600" : "text-red-600")}>$ {cuentaEdit.presupuestoDisponible.toLocaleString("es-CL")}</span></div>
+                    </div>
+                  </div>
+                )
+              })()}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="edit-nombre-proyecto">Nombre proyecto *</Label>
+                  <Input id="edit-nombre-proyecto" value={editNombreProyecto} onChange={(e) => setEditNombreProyecto(e.target.value)} placeholder="Nombre del proyecto" />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-codigo-bip">Código BIP *</Label>
+                  <Input id="edit-codigo-bip" value={editCodigoBIP} onChange={(e) => setEditCodigoBIP(e.target.value)} placeholder="Código BIP o INI" />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-monto-max-anual">Monto máximo para el presente año *</Label>
+                  <div className="flex items-center h-10 rounded-md border border-input bg-muted/50 px-3 text-sm">
+                    <span className="text-gray-500 font-medium mr-1">$</span>
+                    <span className="font-semibold">{cuentas.find((x) => x.id === editCuentaId) ? cuentas.find((x) => x.id === editCuentaId)!.presupuestoTotal.toLocaleString("es-CL") : "—"}</span>
+                  </div>
+                  <p className="text-xs text-gray-500">Se toma del presupuesto total de la cuenta seleccionada.</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-compromisos-anio">Compromisos futuros - Año(s)</Label>
+                  <Input id="edit-compromisos-anio" value={editCompromisosFuturosAnio} onChange={(e) => setEditCompromisosFuturosAnio(e.target.value)} placeholder="Ej: 2027, 2028" />
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <Label htmlFor="edit-compromisos-monto">Compromisos futuros - Monto ($)</Label>
+                  <Input id="edit-compromisos-monto" value={editCompromisosFuturosMontoDisplay} onChange={(e) => handleCompromisosFuturosMontoChange(e.target.value)} placeholder="$ 0" className="font-semibold max-w-xs" />
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="flex gap-3 justify-end border-t pt-4">
+            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isSaving}>Cancelar</Button>
+            <Button onClick={handleSubmit} disabled={isSaving} className="bg-blue-600 hover:bg-blue-700">
+              {isSaving ? (<><Loader2 className="h-4 w-4 mr-2 animate-spin" />Guardando...</>) : (<><Save className="h-4 w-4 mr-2" />Guardar Cambios</>)}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 export default function HistorialCDPForm() {
@@ -98,25 +491,16 @@ export default function HistorialCDPForm() {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
 
-  // Estados para el diálogo de edición
+  // Estados para el diálogo de edición (el formulario tiene estado local en EditCDPFormDialog para evitar lag)
   const [cdpToEdit, setCdpToEdit] = useState<CDP | null>(null)
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [cuentas, setCuentas] = useState<Cuenta[]>([])
 
-  // Campos editables en el modal de edición
-  const [editFecha, setEditFecha] = useState<Date>()
-  const [editMemoNumero, setEditMemoNumero] = useState("")
-  const [editFechaMemo, setEditFechaMemo] = useState<Date>()
-  const [editCargoSolicitante, setEditCargoSolicitante] = useState("")
-  const [editNombreSolicitante, setEditNombreSolicitante] = useState("")
-  const [editDestinoDisponibilidad, setEditDestinoDisponibilidad] = useState("")
-  const [editMontoDisponibilidad, setEditMontoDisponibilidad] = useState("")
-  const [editMontoDisplay, setEditMontoDisplay] = useState("")
-  const [editCuentaId, setEditCuentaId] = useState("")
-  const [editAreaGestion, setEditAreaGestion] = useState("")
-  const [editPrograma, setEditPrograma] = useState("")
-  const [editSubPrograma, setEditSubPrograma] = useState("")
+  // Modal Oficializar CDP
+  const [cdpToOficializar, setCdpToOficializar] = useState<CDP | null>(null)
+  const [isOficializarDialogOpen, setIsOficializarDialogOpen] = useState(false)
+  const [isOficializando, setIsOficializando] = useState(false)
 
   // Paginación del listado
   const [currentPage, setCurrentPage] = useState(1)
@@ -300,75 +684,36 @@ export default function HistorialCDPForm() {
     }
     
     setCdpToEdit(cdp)
-    setEditFecha(toDateSafe(cdp.fecha) ?? undefined)
-    setEditMemoNumero(cdp.memoNumero)
-    setEditFechaMemo(toDateSafe(cdp.fechaMemo) ?? undefined)
-    setEditCargoSolicitante(cdp.cargoSolicitante)
-    setEditNombreSolicitante(cdp.nombreSolicitante)
-    setEditDestinoDisponibilidad(cdp.destinoDisponibilidad)
-    setEditMontoDisponibilidad(cdp.montoDisponibilidad.toString())
-    setEditMontoDisplay(formatMonto(cdp.montoDisponibilidad))
-    setEditCuentaId(cdp.cuentaId || "")
-    setEditAreaGestion(cdp.areaGestion)
-    setEditPrograma(cdp.programa)
-    setEditSubPrograma(cdp.subPrograma)
-    
-    console.log("Cuenta ID seleccionada:", cdp.cuentaId)
-    console.log("Total de cuentas disponibles:", cuentas.length)
-    
     setIsEditDialogOpen(true)
   }
 
-  /** Actualiza monto editable (solo dígitos) y su display formateado en el modal de edición */
-  const handleMontoChange = (value: string) => {
-    const numericValue = value.replace(/\D/g, "")
-    setEditMontoDisponibilidad(numericValue)
-    if (numericValue) {
-      const n = Number.parseInt(numericValue, 10)
-      setEditMontoDisplay(Number.isNaN(n) ? "" : n.toLocaleString("es-CL"))
-    } else {
-      setEditMontoDisplay("")
-    }
-  }
-
-  /** Al cambiar la cuenta en el modal de edición, actualiza editCuentaId */
-  const handleCuentaChange = (cuentaId: string) => {
-    const cuenta = cuentas.find((c) => c.id === cuentaId)
-    if (cuenta) {
-      setEditCuentaId(cuentaId)
-      console.log("📋 Cuenta seleccionada:", cuenta.codigo, "-", cuenta.denominacion)
-    }
-  }
-
-  /** Guarda los cambios del CDP en Firestore, actualiza presupuesto de cuenta (si cambió monto/cuenta) y registra en bitácora */
-  const handleGuardarEdicion = async () => {
+  /** Guarda los cambios del CDP (recibe payload del formulario de edición) */
+  const handleGuardarEdicionFromPayload = async (payload: EditCDPFormPayload) => {
     if (!cdpToEdit || !canEdit) {
       toast.error("No tiene permisos para editar CDPs")
       return
     }
-
-    // Validaciones
-    if (!editFecha || !editFechaMemo) {
-      toast.error("Debe seleccionar las fechas")
-      return
-    }
-
-    if (!editMemoNumero || !editCargoSolicitante || !editNombreSolicitante || !editDestinoDisponibilidad) {
-      toast.error("Debe completar todos los campos obligatorios")
-      return
-    }
+    const {
+      editTipoCDP,
+      editFecha,
+      editFechaMemo,
+      editMemoNumero,
+      editCargoSolicitante,
+      editNombreSolicitante,
+      editDestinoDisponibilidad,
+      editMontoDisponibilidad,
+      editCuentaId,
+      editAreaGestion,
+      editPrograma,
+      editSubPrograma,
+      editNombreProyecto,
+      editCodigoBIP,
+      editMontoMaximoAnual,
+      editCompromisosFuturosAnio,
+      editCompromisosFuturosMonto,
+    } = payload
 
     const nuevoMontoParsed = Number.parseInt(editMontoDisponibilidad || "0", 10)
-    if (Number.isNaN(nuevoMontoParsed) || nuevoMontoParsed <= 0) {
-      toast.error("El monto debe ser mayor a 0")
-      return
-    }
-
-    if (!editCuentaId) {
-      toast.error("Debe seleccionar una cuenta presupuestaria")
-      return
-    }
-
     setIsSaving(true)
     try {
       console.log("📝 Iniciando edición del CDP:", cdpToEdit.cdpNumero)
@@ -563,11 +908,30 @@ export default function HistorialCDPForm() {
         }
       }
 
-      // 2. Actualizar el CDP
+      // 2. Obtener datos actuales de la cuenta (tras posibles ajustes de presupuesto) para Tipo A y Tipo 31
+      const cuentaRefAfter = doc(db, "cuentas", editCuentaId)
+      const cuentaSnapAfter = await getDoc(cuentaRefAfter)
       const cuentaSeleccionada = cuentas.find(c => c.id === editCuentaId)
-      
+      let montoTotalPresupuesto: number | undefined
+      let montoComprometidoFecha: number | undefined
+      let montoComprometidoActo: number | undefined
+      let saldoFinal: number | undefined
+      if (cuentaSnapAfter.exists()) {
+        const data = cuentaSnapAfter.data()
+        const presupuestoTotal = data.presupuestoTotal ?? 0
+        const presupuestoDisponible = data.presupuestoDisponible ?? 0
+        montoTotalPresupuesto = presupuestoTotal
+        const totalComprometido = presupuestoTotal - presupuestoDisponible
+        montoComprometidoActo = nuevoMonto
+        saldoFinal = presupuestoDisponible
+        // Tipo A y Tipo 31: "comprometido a la fecha" = lo ya comprometido SIN este acto (evita duplicar al editar)
+        montoComprometidoFecha = Math.max(0, totalComprometido - nuevoMonto)
+      }
+
+      // 3. Actualizar el CDP
       const cdpRef = doc(db, "cdp", cdpToEdit.id)
-      await updateDoc(cdpRef, {
+      const updateData: Record<string, unknown> = {
+        tipoCDP: editTipoCDP,
         fecha: Timestamp.fromDate(editFecha),
         memoNumero: editMemoNumero,
         fechaMemo: Timestamp.fromDate(editFechaMemo),
@@ -583,12 +947,35 @@ export default function HistorialCDPForm() {
         cuentaId: editCuentaId,
         actualizadoEn: serverTimestamp(),
         actualizadoPor: user?.email || "unknown",
-      })
+      }
+      if (editTipoCDP !== "31") {
+        if (montoTotalPresupuesto != null) {
+          updateData.montoTotalPresupuesto = montoTotalPresupuesto
+          updateData.montoComprometidoFecha = montoComprometidoFecha ?? 0
+          updateData.montoComprometidoActo = montoComprometidoActo ?? nuevoMonto
+          updateData.saldoFinal = saldoFinal ?? 0
+        }
+        updateData.nombreProyecto = null
+        updateData.codigoBIP = null
+        updateData.montoMaximoAnual = null
+        updateData.compromisosFuturosAnio = null
+        updateData.compromisosFuturosMonto = null
+      } else {
+        updateData.nombreProyecto = editNombreProyecto.trim()
+        updateData.codigoBIP = editCodigoBIP.trim()
+        updateData.montoMaximoAnual = montoTotalPresupuesto ?? (Number.parseInt(editMontoMaximoAnual || "0", 10) || 0)
+        updateData.compromisosFuturosAnio = editCompromisosFuturosAnio.trim() || null
+        updateData.compromisosFuturosMonto = Number.parseInt(editCompromisosFuturosMonto || "0", 10) || 0
+        updateData.montoComprometidoFecha = montoComprometidoFecha ?? 0
+        updateData.montoComprometidoActo = montoComprometidoActo ?? nuevoMonto
+        updateData.saldoFinal = saldoFinal ?? 0
+      }
+      await updateDoc(cdpRef, updateData)
 
       console.log("✅ CDP actualizado exitosamente")
       toast.success(`CDP ${cdpToEdit.cdpNumero} actualizado correctamente`)
 
-      // 3. Recargar datos
+      // 4. Recargar datos
       await loadCDPs()
       await loadCuentas()
       
@@ -681,6 +1068,56 @@ export default function HistorialCDPForm() {
       toast.error("Error al eliminar el CDP. Verifique la consola para más detalles.")
     } finally {
       setIsDeleting(false)
+    }
+  }
+
+  /** Abre el modal de confirmación para oficializar el CDP */
+  const handleOficializarClick = (cdp: CDP) => {
+    setCdpToOficializar(cdp)
+    setIsOficializarDialogOpen(true)
+  }
+
+  /** Oficializa el CDP en Firestore y oculta la opción de editar */
+  const handleOficializarConfirm = async () => {
+    if (!cdpToOficializar || !canEdit) {
+      toast.error("No tiene permisos para oficializar CDPs")
+      return
+    }
+    if (cdpToOficializar.oficializado) {
+      toast.error("Este CDP ya está oficializado")
+      setIsOficializarDialogOpen(false)
+      setCdpToOficializar(null)
+      return
+    }
+    if (!puedeOficializarCDP(cdpToOficializar)) {
+      toast.error("Solo se puede oficializar CDPs con fecha a partir del 02/03/2026")
+      setIsOficializarDialogOpen(false)
+      setCdpToOficializar(null)
+      return
+    }
+    setIsOficializando(true)
+    try {
+      const cdpRef = doc(db, "cdp", cdpToOficializar.id)
+      await updateDoc(cdpRef, {
+        oficializado: true,
+        oficializadoEn: serverTimestamp(),
+        oficializadoPor: user?.email || "unknown",
+      })
+      await loadCDPs()
+      setIsOficializarDialogOpen(false)
+      setCdpToOficializar(null)
+      toast.success(
+        <span className="flex items-center gap-2">
+          <CheckCircle className="h-5 w-5 text-green-600 shrink-0" />
+          El certificado de disponibilidad presupuestaria ha sido oficializado con éxito.
+        </span>,
+        { duration: 5000 }
+      )
+    } catch (error) {
+      console.error("Error al oficializar CDP:", error)
+      toast.error("Error al oficializar el CDP. Verifique la consola para más detalles.")
+    } finally {
+      setIsOficializando(false)
     }
   }
 
@@ -829,16 +1266,23 @@ export default function HistorialCDPForm() {
                         })()}
                       </td>
                       <td className="px-6 py-4 text-center">
-                        <Badge
-                          className={cn(
-                            "px-3 py-1 text-xs font-semibold rounded-full",
-                            cdp.estado === "activo"
-                              ? "bg-green-100 text-green-700 border border-green-300 dark:bg-green-900/30 dark:text-green-400 dark:border-green-700"
-                              : "bg-gray-100 text-gray-700 border border-gray-300 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-600"
+                        <div className="flex flex-col gap-1 items-center">
+                          <Badge
+                            className={cn(
+                              "px-3 py-1 text-xs font-semibold rounded-full",
+                              cdp.estado === "activo"
+                                ? "bg-green-100 text-green-700 border border-green-300 dark:bg-green-900/30 dark:text-green-400 dark:border-green-700"
+                                : "bg-gray-100 text-gray-700 border border-gray-300 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-600"
+                            )}
+                          >
+                            {cdp.estado === "activo" ? "● Activo" : "○ Inactivo"}
+                          </Badge>
+                          {cdp.oficializado && (
+                            <Badge className="px-2 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700">
+                              Oficializado
+                            </Badge>
                           )}
-                        >
-                          {cdp.estado === "activo" ? "● Activo" : "○ Inactivo"}
-                        </Badge>
+                        </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center justify-center gap-1.5">
@@ -869,7 +1313,7 @@ export default function HistorialCDPForm() {
                           >
                             <Download className="h-4 w-4 text-[#adca1f]" />
                           </Button>
-                          {canEdit && (
+                          {canEdit && !cdp.oficializado && (
                             <>
                               <div className="w-px h-6 bg-gray-200 dark:bg-gray-700 mx-0.5" />
                               <Button
@@ -881,6 +1325,32 @@ export default function HistorialCDPForm() {
                               >
                                 <Edit className="h-4 w-4 text-blue-600 dark:text-blue-400" />
                               </Button>
+                              {puedeOficializarCDP(cdp) && (
+                              <Button
+                                size="sm"
+                                variant="default"
+                                onClick={() => handleOficializarClick(cdp)}
+                                className="h-8 px-2.5 bg-[#1a2da6] hover:bg-[#1a2da6]/90 text-white font-semibold shadow-md"
+                                title="Oficializar CDP"
+                              >
+                                <Stamp className="h-4 w-4 mr-1" />
+                                Oficializar
+                              </Button>
+                              )}
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => handleEliminarClick(cdp)}
+                                className="h-8 w-8 p-0 hover:bg-red-50 dark:hover:bg-red-900/20"
+                                title="Eliminar CDP"
+                              >
+                                <Trash2 className="h-4 w-4 text-red-600 dark:text-red-400" />
+                              </Button>
+                            </>
+                          )}
+                          {canEdit && cdp.oficializado && (
+                            <>
+                              <div className="w-px h-6 bg-gray-200 dark:bg-gray-700 mx-0.5" />
                               <Button
                                 size="sm"
                                 variant="ghost"
@@ -1320,313 +1790,20 @@ export default function HistorialCDPForm() {
           </Dialog>
         )}
 
-        {/* Modal de Edición */}
-        {cdpToEdit && (
-          <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-            <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle className="text-xl font-bold flex items-center gap-2">
-                  <Edit className="h-6 w-6 text-blue-600" />
-                  Editar CDP N° {cdpToEdit.cdpNumero}
-                </DialogTitle>
-                <DialogDescription>
-                  Modifique los campos necesarios y guarde los cambios. Los montos se ajustarán automáticamente en las cuentas presupuestarias.
-                </DialogDescription>
-              </DialogHeader>
+        {/* Modal de Edición (estado local en EditCDPFormDialog para evitar lag) */}
+        <EditCDPFormDialog
+          open={isEditDialogOpen}
+          onOpenChange={(open) => {
+            setIsEditDialogOpen(open)
+            if (!open) setCdpToEdit(null)
+          }}
+          cdp={cdpToEdit}
+          cuentas={cuentas}
+          onSave={handleGuardarEdicionFromPayload}
+          isSaving={isSaving}
+          formatMontoFn={formatMonto}
+        />
 
-              <div className="space-y-6 py-4">
-                {/* Información General */}
-                <div className="space-y-4">
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white border-b pb-2">
-                    Información General
-                  </h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-fecha">Fecha *</Label>
-                      <Popover>
-                        <PopoverTrigger asChild>
-                          <Button
-                            id="edit-fecha"
-                            variant="outline"
-                            className={cn(
-                              "w-full justify-start text-left font-normal",
-                              !editFecha && "text-muted-foreground"
-                            )}
-                          >
-                            <CalendarIcon className="mr-2 h-4 w-4" />
-                            {editFecha ? format(editFecha, "PPP", { locale: es }) : "Seleccionar fecha"}
-                          </Button>
-                        </PopoverTrigger>
-                        <PopoverContent className="w-auto p-0" align="start">
-                          <Calendar
-                            mode="single"
-                            selected={editFecha}
-                            onSelect={(date) => setEditFecha(date)}
-                            locale={es}
-                            initialFocus
-                          />
-                        </PopoverContent>
-                      </Popover>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-memo">Memo N° *</Label>
-                      <Input
-                        id="edit-memo"
-                        value={editMemoNumero}
-                        onChange={(e) => setEditMemoNumero(e.target.value)}
-                        placeholder="Ej: 123/2026"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-fecha-memo">Fecha Memo *</Label>
-                      <Popover>
-                        <PopoverTrigger asChild>
-                          <Button
-                            id="edit-fecha-memo"
-                            variant="outline"
-                            className={cn(
-                              "w-full justify-start text-left font-normal",
-                              !editFechaMemo && "text-muted-foreground"
-                            )}
-                          >
-                            <CalendarIcon className="mr-2 h-4 w-4" />
-                            {editFechaMemo ? format(editFechaMemo, "PPP", { locale: es }) : "Seleccionar fecha"}
-                          </Button>
-                        </PopoverTrigger>
-                        <PopoverContent className="w-auto p-0" align="start">
-                          <Calendar
-                            mode="single"
-                            selected={editFechaMemo}
-                            onSelect={(date) => setEditFechaMemo(date)}
-                            locale={es}
-                            initialFocus
-                          />
-                        </PopoverContent>
-                      </Popover>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Información del Solicitante */}
-                <div className="space-y-4">
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white border-b pb-2">
-                    Información del Solicitante
-                  </h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-nombre">Nombre Solicitante *</Label>
-                      <Input
-                        id="edit-nombre"
-                        value={editNombreSolicitante}
-                        onChange={(e) => setEditNombreSolicitante(e.target.value)}
-                        placeholder="Nombre completo"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-cargo">Cargo Solicitante *</Label>
-                      <Input
-                        id="edit-cargo"
-                        value={editCargoSolicitante}
-                        onChange={(e) => setEditCargoSolicitante(e.target.value)}
-                        placeholder="Cargo del solicitante"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Información Presupuestaria */}
-                <div className="space-y-4">
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white border-b pb-2">
-                    Información Presupuestaria
-                  </h3>
-                  <div className="grid grid-cols-1 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-destino">Destino Disponibilidad *</Label>
-                      <Input
-                        id="edit-destino"
-                        value={editDestinoDisponibilidad}
-                        onChange={(e) => setEditDestinoDisponibilidad(e.target.value)}
-                        placeholder="Descripción del destino"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-monto">Monto Disponibilidad *</Label>
-                      <Input
-                        id="edit-monto"
-                        value={editMontoDisplay}
-                        onChange={(e) => handleMontoChange(e.target.value)}
-                        placeholder="$ 0"
-                        className="text-lg font-semibold"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-cuenta">Cuenta Presupuestaria *</Label>
-                      <Select value={editCuentaId} onValueChange={handleCuentaChange}>
-                        <SelectTrigger id="edit-cuenta" className="w-full">
-                          <SelectValue placeholder="Seleccione una cuenta">
-                            {editCuentaId && (() => {
-                              const cuentaActual = cuentas.find(c => c.id === editCuentaId)
-                              return cuentaActual ? (
-                                <div className="flex items-center gap-2">
-                                  <span className="font-semibold">{cuentaActual.codigo}</span>
-                                  <span className="text-sm text-gray-600">-</span>
-                                  <span className="text-sm truncate">{cuentaActual.denominacion}</span>
-                                  <span className="text-sm font-semibold text-green-600 ml-auto">
-                                    $ {cuentaActual.presupuestoDisponible.toLocaleString("es-CL")}
-                                  </span>
-                                </div>
-                              ) : "Seleccione una cuenta"
-                            })()}
-                          </SelectValue>
-                        </SelectTrigger>
-                        <SelectContent className="max-h-[400px]">
-                          {cuentas.length === 0 && (
-                            <div className="px-4 py-3 text-sm text-gray-500">
-                              No hay cuentas disponibles. Cargando...
-                            </div>
-                          )}
-                          {cuentas.map((cuenta) => (
-                            <SelectItem 
-                              key={cuenta.id} 
-                              value={cuenta.id}
-                              className="cursor-pointer"
-                            >
-                              <div className="flex items-start gap-2 py-1">
-                                <span className="font-semibold text-gray-900 min-w-[180px]">
-                                  {cuenta.codigo}
-                                </span>
-                                <span className="text-sm text-gray-600 flex-1 truncate max-w-[300px]" title={cuenta.denominacion}>
-                                  {cuenta.denominacion}
-                                </span>
-                                <span className="text-sm font-semibold text-green-600 ml-auto whitespace-nowrap">
-                                  $ {cuenta.presupuestoDisponible.toLocaleString("es-CL")}
-                                </span>
-                              </div>
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {editCuentaId && (() => {
-                        const cuentaSeleccionadaEdit = cuentas.find(c => c.id === editCuentaId)
-                        const montoEdit = Number.parseInt(editMontoDisponibilidad || "0")
-                        const montoOriginal = cdpToEdit?.montoDisponibilidad || 0
-                        const esMismaCuenta = editCuentaId === cdpToEdit?.cuentaId
-                        
-                        if (cuentaSeleccionadaEdit) {
-                          let presupuestoProyectado = cuentaSeleccionadaEdit.presupuestoDisponible
-                          
-                          if (esMismaCuenta) {
-                            // Si es la misma cuenta, ajustar por la diferencia
-                            presupuestoProyectado = presupuestoProyectado + montoOriginal - montoEdit
-                          } else {
-                            // Si es cuenta diferente, solo restar el nuevo monto
-                            presupuestoProyectado = presupuestoProyectado - montoEdit
-                          }
-                          
-                          const suficiente = presupuestoProyectado >= 0
-                          
-                          return (
-                            <div className={cn(
-                              "text-sm px-3 py-2 rounded-md mt-2",
-                              suficiente 
-                                ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300" 
-                                : "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
-                            )}>
-                              <div className="flex items-center justify-between">
-                                <span className="font-medium">
-                                  {suficiente ? "✓ Presupuesto suficiente" : "✗ Presupuesto insuficiente"}
-                                </span>
-                              </div>
-                              <div className="text-xs mt-1 space-y-0.5">
-                                <div>Disponible actual: ${cuentaSeleccionadaEdit.presupuestoDisponible.toLocaleString("es-CL")}</div>
-                                <div>Quedará disponible: ${presupuestoProyectado.toLocaleString("es-CL")}</div>
-                              </div>
-                            </div>
-                          )
-                        }
-                        return null
-                      })()}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Área de Gestión y Programas */}
-                <div className="space-y-4">
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white border-b pb-2">
-                    Área de Gestión y Programas
-                  </h3>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-area">Área de Gestión</Label>
-                      <Input
-                        id="edit-area"
-                        value={editAreaGestion}
-                        onChange={(e) => setEditAreaGestion(e.target.value)}
-                        placeholder="Área"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-programa">Programa</Label>
-                      <Input
-                        id="edit-programa"
-                        value={editPrograma}
-                        onChange={(e) => setEditPrograma(e.target.value)}
-                        placeholder="Programa"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="edit-subprograma">Sub-Programa</Label>
-                      <Input
-                        id="edit-subprograma"
-                        value={editSubPrograma}
-                        onChange={(e) => setEditSubPrograma(e.target.value)}
-                        placeholder="Sub-Programa"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Botones de acción */}
-                <div className="flex gap-3 justify-end border-t pt-4">
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setIsEditDialogOpen(false)
-                      setCdpToEdit(null)
-                    }}
-                    disabled={isSaving}
-                  >
-                    Cancelar
-                  </Button>
-                  <Button
-                    onClick={handleGuardarEdicion}
-                    disabled={isSaving}
-                    className="bg-blue-600 hover:bg-blue-700"
-                  >
-                    {isSaving ? (
-                      <>
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        Guardando...
-                      </>
-                    ) : (
-                      <>
-                        <Save className="h-4 w-4 mr-2" />
-                        Guardar Cambios
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </div>
-            </DialogContent>
-          </Dialog>
-        )}
 
         {/* Diálogo de Confirmación de Eliminación */}
         <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
@@ -1654,6 +1831,37 @@ export default function HistorialCDPForm() {
                     <Trash2 className="h-4 w-4 mr-2" />
                     Eliminar CDP
                   </>
+                )}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* Diálogo de Confirmación de Oficializar CDP */}
+        <AlertDialog open={isOficializarDialogOpen} onOpenChange={(open) => { setIsOficializarDialogOpen(open); if (!open) setCdpToOficializar(null) }}>
+          <AlertDialogContent className="max-w-2xl p-8 gap-6">
+            <AlertDialogHeader className="space-y-4">
+              <AlertDialogTitle className="text-2xl font-bold">
+                Oficializar CDP
+              </AlertDialogTitle>
+              <AlertDialogDescription className="text-base leading-relaxed">
+                Al presionar Sí, el CDP <span className="font-semibold">{cdpToOficializar?.cdpNumero}</span> quedará oficializado con los detalles antes confirmados. A partir de ese momento no podrá editarse. ¿Está seguro que desea oficializarlo?
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter className="flex gap-4 sm:gap-4 pt-4">
+              <AlertDialogCancel disabled={isOficializando} className="text-base px-6 py-2.5 h-auto">No</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleOficializarConfirm}
+                disabled={isOficializando}
+                className="bg-[#1a2da6] hover:bg-[#1a2da6]/90 text-base px-6 py-2.5 h-auto font-semibold"
+              >
+                {isOficializando ? (
+                  <>
+                    <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+                    Oficializando...
+                  </>
+                ) : (
+                  "Sí"
                 )}
               </AlertDialogAction>
             </AlertDialogFooter>

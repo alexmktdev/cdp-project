@@ -13,7 +13,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Users, Search, Eye, Loader2, Mail, Calendar, UserCheck, UserX, UserPlus } from "lucide-react"
 import { toast } from "sonner"
-import { db } from "@/lib/firebase"
+import { db, auth } from "@/lib/firebase"
 import { updateDoc, doc, Timestamp } from "firebase/firestore"
 import { useAuth } from "@/context/auth-context"
 import { format } from "date-fns"
@@ -55,11 +55,29 @@ export default function UsuariosPage() {
     }
   }, [user])
 
-  /** Carga la lista de usuarios vía API (solo sa/admin); evita "Missing or insufficient permissions" con reglas de Firestore. */
-  const loadUsuarios = async () => {
+  /** Carga la lista de usuarios vía API (solo sa/admin). Si el token expiró, refresca la cookie y reintenta. */
+  const loadUsuarios = async (retryAfterRefresh = true) => {
     setIsLoading(true)
     try {
-      const res = await fetch("/api/users/list")
+      let res = await fetch("/api/users/list", { credentials: "include" })
+      if (res.status === 401 && retryAfterRefresh) {
+        const body = await res.json().catch(() => ({}))
+        if (body?.code === "id-token-expired" && auth.currentUser) {
+          try {
+            const newToken = await auth.currentUser.getIdToken(true)
+            await fetch("/api/auth/session", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ token: newToken }),
+            })
+            res = await fetch("/api/users/list", { credentials: "include" })
+          } catch (refreshErr) {
+            console.error("Error al refrescar token:", refreshErr)
+            toast.error("Sesión expirada. Vuelve a iniciar sesión.")
+            return
+          }
+        }
+      }
       if (!res.ok) {
         if (res.status === 401) toast.error("Sesión no disponible. Vuelve a iniciar sesión.")
         else if (res.status === 403) toast.error("No tiene permisos para ver la lista de usuarios.")

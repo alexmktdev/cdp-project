@@ -342,6 +342,18 @@ export default function CrearCDPForm() {
     }
   }, [cuentas])
 
+  /** Tipo 31: rellenar automáticamente "Monto máximo para el presente año" con el presupuesto total de la cuenta */
+  useEffect(() => {
+    if (tipoCDP === "31" && cuentaSeleccionada) {
+      const total = cuentaSeleccionada.presupuestoTotal
+      setMontoMaximoAnual(String(total))
+      setMontoMaximoAnualDisplay(total.toLocaleString("es-CL"))
+    } else if (tipoCDP !== "31") {
+      setMontoMaximoAnual("")
+      setMontoMaximoAnualDisplay("")
+    }
+  }, [tipoCDP, cuentaSeleccionada])
+
   // --- Montos calculados para Tipo A (IN4/2026): total, comprometido a la fecha, por acto, saldo final ---
   const montoComprometidoActo = Number(montoDisponibilidad) || 0
 
@@ -418,9 +430,9 @@ export default function CrearCDPForm() {
     )
   }, [cuentaSeleccionada, desagregacionSubtitulo, desagregacionItem, desagregacionAsignacion, desagregacionSubasignacion])
 
-  /** Panel de montos IN4/2026 para Tipo A (total, comprometido a la fecha, por acto, saldo final) */
+  /** Panel de montos IN4/2026 para Tipo A y Tipo 31 (total, comprometido a la fecha, por acto, saldo final) */
   const montosPanel = useMemo(() => {
-    if (tipoCDP !== "22-24-33" || !cuentaSeleccionada) return null
+    if (!cuentaSeleccionada) return null
     return (
       <div className="md:col-span-2 mt-2 p-4 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg">
         <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">
@@ -626,7 +638,7 @@ export default function CrearCDPForm() {
       return
     }
 
-    // Validar campos Tipo B (Subtítulo 31)
+    // Validar campos Tipo B (Subtítulo 31). El monto máximo para el presente año se toma del presupuesto total de la cuenta.
     if (tipoCDP === "31") {
       if (!nombreProyecto || nombreProyecto.trim() === "") {
         toast.error("Por favor ingrese el nombre del estudio, programa o proyecto")
@@ -635,11 +647,6 @@ export default function CrearCDPForm() {
       }
       if (!codigoBIP || codigoBIP.trim() === "") {
         toast.error("Por favor ingrese el código BIP o INI")
-        setIsLoading(false)
-        return
-      }
-      if (!montoMaximoAnual || montoMaximoAnual === "0" || montoMaximoAnual === "") {
-        toast.error("Por favor ingrese el monto máximo para el presente año")
         setIsLoading(false)
         return
       }
@@ -721,11 +728,15 @@ export default function CrearCDPForm() {
         cdpData.montoComprometidoActo = montoSolicitado
         cdpData.saldoFinal = saldoFinal
       } else {
+        // Tipo 31: monto máximo para el presente año = presupuesto total de la cuenta (Configuración de cuentas)
         cdpData.nombreProyecto = nombreProyecto
         cdpData.codigoBIP = codigoBIP
-        cdpData.montoMaximoAnual = Number(montoMaximoAnual) || 0
+        cdpData.montoMaximoAnual = cuentaSeleccionada?.presupuestoTotal ?? 0
         cdpData.compromisosFuturosAnio = compromisosFuturosAnio
         cdpData.compromisosFuturosMonto = Number(compromisosFuturosMonto) || 0
+        cdpData.montoComprometidoFecha = montoComprometidoFecha
+        cdpData.montoComprometidoActo = montoSolicitado
+        cdpData.saldoFinal = saldoFinal
       }
       console.log("cdpData creado:", cdpData)
 
@@ -807,9 +818,13 @@ export default function CrearCDPForm() {
               saldoFinal: saldoFinal,
             }
           : {
+              montoTotalPresupuesto: montoTotalPresupuesto,
+              montoComprometidoFecha: montoComprometidoFecha,
+              montoComprometidoActo: montoSolicitado,
+              saldoFinal: saldoFinal,
               nombreProyecto: nombreProyecto,
               codigoBIP: codigoBIP,
-              montoMaximoAnual: Number(montoMaximoAnual) || 0,
+              montoMaximoAnual: cuentaSeleccionada?.presupuestoTotal ?? 0,
               compromisosFuturosAnio: compromisosFuturosAnio,
               compromisosFuturosMonto: Number(compromisosFuturosMonto) || 0,
             }),
@@ -1345,25 +1360,23 @@ export default function CrearCDPForm() {
                     </p>
                   </div>
 
-                  {/* Monto Máximo Anual */}
+                  {/* Monto Máximo para el Presente Año: se rellena con el presupuesto total de la cuenta */}
                   <div className="space-y-2">
                     <Label htmlFor="montoMaximoAnual" className="flex items-center gap-1.5 text-sm font-medium">
                       <DollarSign className="h-4 w-4 text-purple-500" />
                       Monto Máximo para el Presente Año *
                     </Label>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-500 font-medium">$</span>
-                      <FastMontoInput
-                        id="montoMaximoAnual"
-                        type="text"
-                        inputMode="numeric"
-                        placeholder="0"
-                        value={montoMaximoAnual}
-                        onValueChange={setMontoMaximoAnual}
-                        className="pl-8"
-                        required={tipoCDP === "31"}
-                      />
+                    <div className="relative flex items-center h-10 rounded-md border border-input bg-muted/50 px-3 text-sm">
+                      <span className="text-gray-500 font-medium mr-1">$</span>
+                      <span className="font-semibold">
+                        {cuentaSeleccionada
+                          ? cuentaSeleccionada.presupuestoTotal.toLocaleString("es-CL")
+                          : "—"}
+                      </span>
                     </div>
+                    <p className="text-xs text-gray-500">
+                      Se toma del presupuesto total de la cuenta seleccionada (Configuración de cuentas).
+                    </p>
                   </div>
 
                   {/* Compromisos Futuros */}

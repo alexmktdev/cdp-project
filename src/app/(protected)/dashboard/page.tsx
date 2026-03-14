@@ -65,6 +65,8 @@ interface CDP {
   numeroItemPresupuestario?: string
   creadoEn: any
   fecha?: any
+  /** Si true, el CDP está oficializado y ya no se puede editar */
+  oficializado?: boolean
 }
 
 export default function DashboardPage() {
@@ -536,7 +538,7 @@ export default function DashboardPage() {
                 <Link key={cdp.id} href="/cdp/historial">
                   <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-lg hover:shadow transition-shadow cursor-pointer">
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-mono font-semibold text-sm text-[#1a2da6]">{cdp.cdpNumero}</span>
                         <Badge
                           variant="outline"
@@ -544,6 +546,11 @@ export default function DashboardPage() {
                         >
                           Subtítulo: {getSubtituloFromCodigoCuenta(cdp.numeroItemPresupuestario) ?? (cdp.tipoCDP === "31" ? "31" : "21-30, 32-33")}
                         </Badge>
+                        {cdp.oficializado && (
+                          <Badge variant="outline" className="text-xs bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 border-emerald-200">
+                            Oficializado
+                          </Badge>
+                        )}
                       </div>
                       <p className="text-xs text-gray-500 mt-1">
                         {toDateSafe(cdp.creadoEn) ? format(toDateSafe(cdp.creadoEn)!, "dd/MM/yyyy", { locale: es }) : ""}

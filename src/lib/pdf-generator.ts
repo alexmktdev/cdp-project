@@ -568,7 +568,7 @@ export const generarPDFCDP = async (data: CDPData) => {
       ["Saldo final", formatearMonto(data.saldoFinal ?? 0)],
     ];
   } else {
-    // Tipo B: Subtítulo 31
+    // Tipo B: Subtítulo 31 — Nombre, Código BIP/INI, imputación, año, monto máximo, compromisos futuros, comprometido a la fecha, por el acto, saldo final
     cuerpoTabla = [
       ["Nombre", data.nombreProyecto || "—"],
       ["Código (BIP o INI, según corresponda)", data.codigoBIP || "—"],
@@ -584,6 +584,15 @@ export const generarPDFCDP = async (data: CDPData) => {
         }`,
         formatearMonto(data.compromisosFuturosMonto ?? 0),
       ],
+      [
+        "Monto comprometido a la fecha",
+        formatearMonto(data.montoComprometidoFecha ?? 0),
+      ],
+      [
+        "Monto comprometido por el acto administrativo",
+        formatearMonto(data.montoComprometidoActo ?? data.montoDisponibilidad ?? 0),
+      ],
+      ["Saldo final", formatearMonto(data.saldoFinal ?? 0)],
     ];
   }
 
@@ -592,14 +601,14 @@ export const generarPDFCDP = async (data: CDPData) => {
     body: cuerpoTabla,
     theme: "grid",
     styles: {
-      fontSize: 10,
-      cellPadding: 3,
+      fontSize: tipo === "31" ? 9 : 10,
+      cellPadding: tipo === "31" ? 2 : 3,
       textColor: [0, 0, 0],
       lineColor: [0, 0, 0],
       lineWidth: 0.2,
     },
     columnStyles: {
-      0: { fontStyle: "normal", cellWidth: 110 },
+      0: { fontStyle: "normal", cellWidth: tipo === "31" ? 105 : 110 },
       1: { fontStyle: "normal" },
     },
     margin: { left: margenIzq, right: margenDer },
@@ -608,15 +617,15 @@ export const generarPDFCDP = async (data: CDPData) => {
     },
   });
 
-  y = (doc as any).lastAutoTable.finalY + 8;
+  y = (doc as any).lastAutoTable.finalY + (tipo === "31" ? 5 : 8);
 
-  // ===== INFORMACIÓN ADICIONAL (recuadro) =====
+  // ===== INFORMACIÓN ADICIONAL (recuadro compacto para no chocar con firma) =====
   const yInfoStart = y;
 
-  doc.setFontSize(9);
+  doc.setFontSize(8);
   doc.setFont("helvetica", "italic");
   doc.text("Información adicional (opcional):", margenIzq + 4, y + 4);
-  y += 8;
+  y += 10;
 
   doc.setFont("helvetica", "normal");
 
@@ -627,13 +636,13 @@ export const generarPDFCDP = async (data: CDPData) => {
     `Memo N° ${data.memoNumero}, fecha ${fechaMemoTexto}`,
     `Solicitante: ${data.nombreSolicitante}, ${data.cargoSolicitante}`,
     `Destino: ${data.destinoDisponibilidad}`,
-    `Área de Gestión: ${data.areaGestion} | Programa: ${data.programa} | Sub-Programa: ${data.subPrograma}`,
+    `Área: ${data.areaGestion} | Programa: ${data.programa} | Sub: ${data.subPrograma}`,
   ];
 
   for (const linea of lineasInfo) {
-    const wrapped = doc.splitTextToSize(linea, anchoUtil - 10);
-    doc.text(wrapped, margenIzq + 6, y);
-    y += wrapped.length * 4 + 1;
+    const wrapped = doc.splitTextToSize(linea, anchoUtil - 8);
+    doc.text(wrapped, margenIzq + 4, y);
+    y += wrapped.length * 3.5 + 1;
   }
   y += 2;
 

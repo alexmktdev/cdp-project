@@ -13,7 +13,7 @@ import { Label } from "@/components/ui/label"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { Plus, Pencil, Eye, Search, DollarSign, Upload, Download, Loader2, FileText, X, ChevronLeft, ChevronRight, History, AlertCircle, LayoutDashboard } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
-import { cn, toDateSafe, getDisplayName } from "@/lib/utils"
+import { cn, toDateSafe, getDisplayName, getSubtituloFromCodigoCuenta } from "@/lib/utils"
 import { toast } from "sonner"
 import { db } from "@/lib/firebase"
 import { collection, addDoc, getDocs, updateDoc, doc, query, orderBy, where, Timestamp, serverTimestamp } from "firebase/firestore"
@@ -51,6 +51,10 @@ interface CDP {
   estado: string
   creadoPor: string
   creadoEn: Timestamp
+  tipoCDP?: "22-24-33" | "31"
+  numeroItemPresupuestario?: string
+  /** Si true, el CDP está oficializado y ya no se puede editar */
+  oficializado?: boolean
 }
 
 /** Registro de la colección bitacora_cuentas */
@@ -58,7 +62,7 @@ interface RegistroBitacora {
   id: string
   cuentaId: string
   codigoCuenta: string
-  tipoAccion: "creacion" | "edicion" | "recalculo" | "ajuste_cdp" | "cdp_creado" | "cdp_editado" | "cdp_eliminado"
+  tipoAccion: "creacion" | "edicion" | "recalculo" | "ajuste_cdp" | "ajuste_presupuesto" | "cdp_creado" | "cdp_editado" | "cdp_eliminado"
   descripcion: string
   valorAnterior?: any
   valorNuevo?: any
@@ -102,6 +106,10 @@ export default function ConfiguracionCuentasPage() {
   const [denominacion, setDenominacion] = useState("")
   const [presupuestoTotal, setPresupuestoTotal] = useState("")
   const [presupuestoDisplay, setPresupuestoDisplay] = useState("")
+  const [agregarPresupuesto, setAgregarPresupuesto] = useState("")
+  const [agregarPresupuestoDisplay, setAgregarPresupuestoDisplay] = useState("")
+  const [quitarPresupuesto, setQuitarPresupuesto] = useState("")
+  const [quitarPresupuestoDisplay, setQuitarPresupuestoDisplay] = useState("")
   const [subtitulo, setSubtitulo] = useState("")
   const [itemPres, setItemPres] = useState("")
   const [asignacion, setAsignacion] = useState("")
@@ -246,7 +254,7 @@ export default function ConfiguracionCuentasPage() {
   const registrarBitacora = async (
     cuentaId: string,
     codigoCuenta: string,
-    tipoAccion: "creacion" | "edicion" | "recalculo" | "ajuste_cdp",
+    tipoAccion: "creacion" | "edicion" | "recalculo" | "ajuste_cdp" | "ajuste_presupuesto",
     descripcion: string,
     valorAnterior?: any,
     valorNuevo?: any
@@ -341,6 +349,7 @@ export default function ConfiguracionCuentasPage() {
       "edicion": "Edición",
       "recalculo": "Recálculo",
       "ajuste_cdp": "Ajuste por CDP",
+      "ajuste_presupuesto": "Ajuste de presupuesto",
       "cdp_creado": "CDP creado",
       "cdp_editado": "CDP editado",
       "cdp_eliminado": "CDP eliminado"
@@ -355,6 +364,7 @@ export default function ConfiguracionCuentasPage() {
       "edicion": "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
       "recalculo": "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
       "ajuste_cdp": "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
+      "ajuste_presupuesto": "bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-200",
       "cdp_creado": "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200",
       "cdp_editado": "bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-200",
       "cdp_eliminado": "bg-rose-100 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200"
@@ -377,12 +387,31 @@ export default function ConfiguracionCuentasPage() {
     setPresupuestoDisplay(formatNumber(value))
   }
 
+  /** Actualiza "agregar presupuesto" (solo números) y su display formateado */
+  const handleAgregarPresupuestoChange = (value: string) => {
+    const clean = value.replace(/\D/g, "")
+    setAgregarPresupuesto(clean)
+    setAgregarPresupuestoDisplay(formatNumber(value))
+  }
+
+  /** Actualiza "quitar presupuesto" (solo números) y su display formateado */
+  const handleQuitarPresupuestoChange = (value: string) => {
+    const clean = value.replace(/\D/g, "")
+    setQuitarPresupuesto(clean)
+    setQuitarPresupuestoDisplay(formatNumber(value))
+  }
+
   /** Crea o actualiza la cuenta en Firestore; si es edición actualiza presupuesto y registra en bitácora */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!codigo.trim() || !denominacion.trim() || !presupuestoTotal) {
-      toast.error("Por favor complete todos los campos")
+    if (!codigo.trim() || !denominacion.trim()) {
+      toast.error("Por favor complete código y denominación")
+      return
+    }
+
+    if (!selectedCuenta && !presupuestoTotal) {
+      toast.error("Por favor ingrese el presupuesto total para la nueva cuenta")
       return
     }
 
@@ -391,8 +420,15 @@ export default function ConfiguracionCuentasPage() {
     try {
       if (selectedCuenta) {
         const cuentaRef = doc(db, "cuentas", selectedCuenta.id)
-        const nuevoPresupuestoTotal = Number(presupuestoTotal)
-        const diferencia = nuevoPresupuestoTotal - selectedCuenta.presupuestoTotal
+        const agregar = Number(agregarPresupuesto) || 0
+        const quitar = Number(quitarPresupuesto) || 0
+        const nuevoPresupuestoTotal = selectedCuenta.presupuestoTotal + agregar - quitar
+        if (nuevoPresupuestoTotal < 0) {
+          toast.error("El presupuesto total no puede quedar negativo. Ajuste los montos a agregar o quitar.")
+          setIsLoading(false)
+          return
+        }
+        const diferencia = agregar - quitar
         const nuevoPresupuestoDisponible = selectedCuenta.presupuestoDisponible + diferencia
         
         await updateDoc(cuentaRef, {
@@ -408,15 +444,30 @@ export default function ConfiguracionCuentasPage() {
         })
         
         // Registrar cambios en bitácora
-        const cambios = []
+        const cambios: string[] = []
         if (selectedCuenta.codigo !== codigo.toUpperCase()) {
           cambios.push(`Código: ${selectedCuenta.codigo} → ${codigo.toUpperCase()}`)
         }
         if (selectedCuenta.denominacion !== denominacion) {
           cambios.push(`Denominación: "${selectedCuenta.denominacion}" → "${denominacion}"`)
         }
-        if (selectedCuenta.presupuestoTotal !== nuevoPresupuestoTotal) {
-          cambios.push(`Presupuesto Total: $${formatMonto(selectedCuenta.presupuestoTotal)} → $${formatMonto(nuevoPresupuestoTotal)}`)
+        const anteriorPresupuesto = selectedCuenta.presupuestoTotal
+        const soloCambioPresupuesto =
+          selectedCuenta.presupuestoTotal !== nuevoPresupuestoTotal &&
+          selectedCuenta.codigo === codigo.toUpperCase() &&
+          selectedCuenta.denominacion === denominacion &&
+          (selectedCuenta.subtitulo || "") === subtitulo.trim() &&
+          (selectedCuenta.item || "") === itemPres.trim() &&
+          (selectedCuenta.asignacion || "") === asignacion.trim() &&
+          (selectedCuenta.subasignacion || "") === subasignacion.trim()
+
+        if (anteriorPresupuesto !== nuevoPresupuestoTotal) {
+          const diff = nuevoPresupuestoTotal - anteriorPresupuesto
+          if (diff > 0) {
+            cambios.push(`Se agregaron $${formatMonto(diff)} de presupuesto (anterior: $${formatMonto(anteriorPresupuesto)}, nuevo: $${formatMonto(nuevoPresupuestoTotal)})`)
+          } else {
+            cambios.push(`Se redujo el presupuesto en $${formatMonto(Math.abs(diff))} (anterior: $${formatMonto(anteriorPresupuesto)}, nuevo: $${formatMonto(nuevoPresupuestoTotal)})`)
+          }
         }
         if ((selectedCuenta.subtitulo || "") !== subtitulo.trim()) {
           cambios.push(`Subtítulo: "${selectedCuenta.subtitulo || ""}" → "${subtitulo.trim()}"`)
@@ -432,11 +483,12 @@ export default function ConfiguracionCuentasPage() {
         }
         
         if (cambios.length > 0) {
+          const descripcion = soloCambioPresupuesto ? cambios[0] : `Cuenta editada. Cambios: ${cambios.join(", ")}`
           await registrarBitacora(
             selectedCuenta.id,
             codigo.toUpperCase(),
-            "edicion",
-            `Cuenta editada. Cambios: ${cambios.join(", ")}`,
+            soloCambioPresupuesto ? "ajuste_presupuesto" : "edicion",
+            descripcion,
             {
               codigo: selectedCuenta.codigo,
               denominacion: selectedCuenta.denominacion,
@@ -618,6 +670,10 @@ export default function ConfiguracionCuentasPage() {
     setDenominacion("")
     setPresupuestoTotal("")
     setPresupuestoDisplay("")
+    setAgregarPresupuesto("")
+    setAgregarPresupuestoDisplay("")
+    setQuitarPresupuesto("")
+    setQuitarPresupuestoDisplay("")
     setSubtitulo("")
     setItemPres("")
     setAsignacion("")
@@ -625,13 +681,17 @@ export default function ConfiguracionCuentasPage() {
     setSelectedCuenta(null)
   }
 
-  /** Rellena el formulario con los datos de la cuenta para editar */
+  /** Rellena el formulario con los datos de la cuenta para editar (presupuesto actual fijo; agregar/quitar vacíos) */
   const handleEdit = (cuenta: Cuenta) => {
     setSelectedCuenta(cuenta)
     setCodigo(cuenta.codigo)
     setDenominacion(cuenta.denominacion)
     setPresupuestoTotal(cuenta.presupuestoTotal.toString())
     setPresupuestoDisplay(formatNumber(cuenta.presupuestoTotal.toString()))
+    setAgregarPresupuesto("")
+    setAgregarPresupuestoDisplay("")
+    setQuitarPresupuesto("")
+    setQuitarPresupuestoDisplay("")
     setSubtitulo(cuenta.subtitulo || "")
     setItemPres(cuenta.item || "")
     setAsignacion(cuenta.asignacion || "")
@@ -896,20 +956,70 @@ export default function ConfiguracionCuentasPage() {
                   <p className="text-xs text-gray-400">Desagregación según clasificador presupuestario (IN4/2026)</p>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="presupuesto">Presupuesto Total *</Label>
-                  <div className="relative">
-                    <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
-                    <Input
-                      id="presupuesto"
-                      placeholder="0"
-                      value={presupuestoDisplay}
-                      onChange={(e) => handlePresupuestoChange(e.target.value)}
-                      className="pl-10"
-                      required
-                    />
+                {/* Presupuesto: al crear una cuenta es un solo campo; al editar, presupuesto actual fijo + agregar / quitar */}
+                {selectedCuenta ? (
+                  <>
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium text-gray-700 dark:text-gray-300">Presupuesto actual</Label>
+                      <div className="relative">
+                        <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
+                        <Input
+                          id="presupuestoActual"
+                          readOnly
+                          value={formatMonto(selectedCuenta.presupuestoTotal)}
+                          className="pl-10 bg-gray-100 dark:bg-gray-800 cursor-default"
+                        />
+                      </div>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">Este valor se actualizará al guardar según lo que agregue o quite abajo.</p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="agregarPresupuesto">Agregar presupuesto</Label>
+                      <div className="relative">
+                        <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-green-600" />
+                        <Input
+                          id="agregarPresupuesto"
+                          placeholder="0"
+                          value={agregarPresupuestoDisplay}
+                          onChange={(e) => handleAgregarPresupuestoChange(e.target.value)}
+                          className="pl-10"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="quitarPresupuesto">Quitar / disminuir presupuesto</Label>
+                      <div className="relative">
+                        <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-amber-600" />
+                        <Input
+                          id="quitarPresupuesto"
+                          placeholder="0"
+                          value={quitarPresupuestoDisplay}
+                          onChange={(e) => handleQuitarPresupuestoChange(e.target.value)}
+                          className="pl-10"
+                        />
+                      </div>
+                    </div>
+                    {(agregarPresupuesto || quitarPresupuesto) && (
+                      <p className="text-xs text-gray-600 dark:text-gray-400">
+                        Nuevo total: $ {formatMonto(selectedCuenta.presupuestoTotal + (Number(agregarPresupuesto) || 0) - (Number(quitarPresupuesto) || 0))}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <div className="space-y-2">
+                    <Label htmlFor="presupuesto">Presupuesto Total *</Label>
+                    <div className="relative">
+                      <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
+                      <Input
+                        id="presupuesto"
+                        placeholder="0"
+                        value={presupuestoDisplay}
+                        onChange={(e) => handlePresupuestoChange(e.target.value)}
+                        className="pl-10"
+                        required
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <div className="flex justify-end gap-2 pt-4">
                   <Button
@@ -1435,6 +1545,9 @@ export default function ConfiguracionCuentasPage() {
                                 CDP N°
                               </th>
                               <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
+                                Tipo
+                              </th>
+                              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
                                 Fecha
                               </th>
                               <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
@@ -1463,6 +1576,19 @@ export default function ConfiguracionCuentasPage() {
                                   </span>
                                 </td>
                                 <td className="px-6 py-4 whitespace-nowrap">
+                                  <Badge
+                                    variant="outline"
+                                    className={cn(
+                                      "text-xs",
+                                      (getSubtituloFromCodigoCuenta(cdp.numeroItemPresupuestario) === "31" || cdp.tipoCDP === "31")
+                                        ? "bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400"
+                                        : "bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400"
+                                    )}
+                                  >
+                                    {getSubtituloFromCodigoCuenta(cdp.numeroItemPresupuestario) ?? (cdp.tipoCDP === "31" ? "31" : "21-30, 32-33")}
+                                  </Badge>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap">
                                   <span className="text-sm text-gray-900 dark:text-white">
                                     {toDateSafe(cdp.fecha) ? format(toDateSafe(cdp.fecha)!, "dd/MM/yyyy", { locale: es }) : "N/A"}
                                   </span>
@@ -1488,13 +1614,21 @@ export default function ConfiguracionCuentasPage() {
                                   </span>
                                 </td>
                                 <td className="px-6 py-4 whitespace-nowrap text-center">
-                                  <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${
-                                    cdp.estado === "activo" 
-                                      ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                                      : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
-                                  }`}>
-                                    {cdp.estado === "activo" ? "Activo" : cdp.estado}
-                                  </span>
+                                  <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                                    {cdp.oficializado && (
+                                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200">
+                                        Oficializado
+                                      </span>
+                                    )}
+                                    <span className={cn(
+                                      "inline-flex items-center px-3 py-1 rounded-full text-xs font-medium",
+                                      cdp.estado === "activo"
+                                        ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                                        : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"
+                                    )}>
+                                      {cdp.estado === "activo" ? "Activo" : (cdp.estado || "—")}
+                                    </span>
+                                  </div>
                                 </td>
                               </tr>
                             ))}

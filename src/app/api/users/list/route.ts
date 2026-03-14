@@ -22,7 +22,19 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    const decodedClaims = await getAdminAuth().verifyIdToken(sessionCookie)
+    let decodedClaims
+    try {
+      decodedClaims = await getAdminAuth().verifyIdToken(sessionCookie)
+    } catch (verifyError: unknown) {
+      const code = (verifyError as { code?: string })?.code
+      if (code === "auth/id-token-expired") {
+        return NextResponse.json(
+          { error: "Token expirado", code: "id-token-expired" },
+          { status: 401 }
+        )
+      }
+      throw verifyError
+    }
     const currentUserUid = decodedClaims.uid
 
     const userDoc = await getAdminDb().collection("users").doc(currentUserUid).get()
